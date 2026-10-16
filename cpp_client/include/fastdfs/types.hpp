@@ -30,6 +30,7 @@ constexpr size_t FDFS_MAX_META_NAME_LEN = 64;
 constexpr size_t FDFS_MAX_META_VALUE_LEN = 256;
 constexpr size_t FDFS_FILE_PREFIX_MAX_LEN = 16;
 constexpr size_t FDFS_STORAGE_ID_MAX_SIZE = 16;
+constexpr size_t FDFS_PROTO_PKG_LEN_SIZE = 8;
 constexpr size_t FDFS_VERSION_SIZE = 8;
 constexpr size_t IP_ADDRESS_SIZE = 16;
 

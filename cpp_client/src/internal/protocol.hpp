@@ -58,6 +58,49 @@ std::vector<uint8_t> encode_metadata(const Metadata& metadata);
  */
 Metadata decode_metadata(const std::vector<uint8_t>& data);
 
+/**
+ * Decodes T from unsigned char*
+ * T must be unsigned integral
+ * If width > sizeof(T), only the least significant sizeof(T) bytes are decoded.
+ * The decoded value may be truncated if it cannot be represented by T.
+ */
+template<typename T>
+unsigned char* decode_bigendian_num(T& dest, unsigned char* data, size_t width = sizeof(T)) {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>,
+                  "T must be an unsigned integral type");
+
+    auto len = width > sizeof(T) ? sizeof(T) : width;
+
+    dest = 0;
+    for (size_t p = 0 ; p < len; ++p) {
+        dest <<= 8;
+        dest |= data[width - len + p];
+    }
+
+    return data + width;
+}
+
+/**
+ * Encodes T to std::vector<uint8_t> in big-endian
+ * T must be unsigned integral
+ * If width < sizeof(T), only the least significant width bytes are written.
+ * The encoded value may be truncated if value cannot be represented in width bytes.
+ */
+template<typename T>
+std::vector<uint8_t> encode_bigendian_num(T value, size_t width = sizeof(T)) {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>,
+                  "T must be an unsigned integral type");
+
+    auto len = width > sizeof(T) ? sizeof(T) : width;
+
+    std::vector<uint8_t> result(width,0);
+    for (auto p = 0; p < len; ++p) {
+        result[width - 1 - p] = value & 0xFF;
+        value>>=8;
+    }
+    return result;
+}
+
 } // namespace internal
 } // namespace fastdfs
 

@@ -121,13 +121,14 @@ Operations::StorageServer Operations::query_storage_store(const std::string& gro
         server.ip_addr = ip_addr;
         
         // Port is stored as big-endian int64_t after IP address
-        uint16_t port = 0;
-        if (resp_body.size() >= FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE + 2) {
-            port = (static_cast<uint16_t>(resp_body[FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE]) << 8) |
-                   static_cast<uint16_t>(resp_body[FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE + 1]);
-        } else {
-            port = STORAGE_DEFAULT_PORT;
+        uint16_t port = STORAGE_DEFAULT_PORT;
+        if (resp_body.size() >= FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE + sizeof(uint64_t) - 1) {
+            uint64_t val;
+            // The protocol's fixed-width IP field is IP_ADDRESS_SIZE - 1 bytes
+            decode_bigendian_num(val, resp_body.data() + FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE - 1);
+            port = val & 0xFFFF;
         }
+
         server.port = port;
         
         tracker_pool_.release(conn);
@@ -163,17 +164,21 @@ Operations::StorageServer Operations::query_storage_fetch(const std::string& fil
         }
         
         auto resp_body = conn->recv(resp_header.length);
-        
+
         StorageServer server;
-        std::string ip_addr(reinterpret_cast<const char*>(resp_body.data()), IP_ADDRESS_SIZE);
+        std::string ip_addr(reinterpret_cast<const char*>(resp_body.data() + FDFS_GROUP_NAME_MAX_LEN),
+                           IP_ADDRESS_SIZE);
+        // Remove null terminators
         ip_addr = ip_addr.substr(0, ip_addr.find('\0'));
         server.ip_addr = ip_addr;
         
         uint16_t port = STORAGE_DEFAULT_PORT;
-        if (resp_body.size() >= IP_ADDRESS_SIZE + 2) {
-            port = (static_cast<uint16_t>(resp_body[IP_ADDRESS_SIZE]) << 8) |
-                   static_cast<uint16_t>(resp_body[IP_ADDRESS_SIZE + 1]);
+        if (resp_body.size() >= FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE + sizeof(uint64_t) - 1) {
+            uint64_t val;
+            decode_bigendian_num(val, resp_body.data() + FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE - 1);
+            port = val & 0xFFFF;
         }
+
         server.port = port;
         server.group_name = group_name;
         
@@ -210,14 +215,25 @@ Operations::StorageServer Operations::query_storage_update(const std::string& fi
         }
         
         auto resp_body = conn->recv(resp_header.length);
-        
+
         StorageServer server;
-        std::string ip_addr(reinterpret_cast<const char*>(resp_body.data()), IP_ADDRESS_SIZE);
+        std::string ip_addr(reinterpret_cast<const char*>(resp_body.data() + FDFS_GROUP_NAME_MAX_LEN),
+                           IP_ADDRESS_SIZE);
+        // Remove null terminators
         ip_addr = ip_addr.substr(0, ip_addr.find('\0'));
         server.ip_addr = ip_addr;
-        server.port = STORAGE_DEFAULT_PORT;
+
+        uint16_t port = STORAGE_DEFAULT_PORT;
+        if (resp_body.size() >= FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE + sizeof(uint64_t) - 1) {
+            uint64_t val;
+            decode_bigendian_num(val, resp_body.data() + FDFS_GROUP_NAME_MAX_LEN + IP_ADDRESS_SIZE - 1);
+            port = val & 0xFFFF;
+        }
+
+        server.port = port;
         server.group_name = group_name;
-        
+
+
         tracker_pool_.release(conn);
         return server;
     } catch (...) {
@@ -254,13 +270,18 @@ std::string Operations::upload_buffer(const std::vector<uint8_t>& data,
             static_cast<uint8_t>(StorageCommand::UPLOAD_FILE);
         
         auto ext_bytes = pad_string(file_ext_name, FDFS_FILE_EXT_NAME_MAX_LEN);
-        int64_t body_len = 1 + FDFS_FILE_EXT_NAME_MAX_LEN + static_cast<int64_t>(data.size());
+        int64_t body_len = 1 + FDFS_PROTO_PKG_LEN_SIZE + FDFS_FILE_EXT_NAME_MAX_LEN + static_cast<int64_t>(data.size());
         
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
         
         // Store path index (0 for now)
         temp_conn.send({0});
+
+        // Package size
+        uint64_t size_val = data.size();
+        auto pkg_size = encode_bigendian_num(size_val, FDFS_PROTO_PKG_LEN_SIZE);
+        temp_conn.send(pkg_size);
         
         // File extension
         temp_conn.send(std::vector<uint8_t>(ext_bytes.begin(), ext_bytes.end()));
@@ -324,15 +345,17 @@ std::string Operations::upload_slave_file(const std::string& master_file_id,
         
         auto prefix_bytes = pad_string(prefix_name, FDFS_FILE_PREFIX_MAX_LEN);
         auto ext_bytes = pad_string(file_ext_name, FDFS_FILE_EXT_NAME_MAX_LEN);
-        auto master_bytes = pad_string(remote_filename, 128); // Master filename length
-        
-        int64_t body_len = FDFS_FILE_PREFIX_MAX_LEN + FDFS_FILE_EXT_NAME_MAX_LEN +
-                          static_cast<int64_t>(master_bytes.length()) +
-                          static_cast<int64_t>(data.size());
+        auto master_bytes = pad_string(remote_filename, 127); // Master filename length
+
+        int64_t body_len = 2 * FDFS_PROTO_PKG_LEN_SIZE + FDFS_FILE_PREFIX_MAX_LEN
+         + FDFS_FILE_EXT_NAME_MAX_LEN + static_cast<int64_t>(master_bytes.length())
+         + static_cast<int64_t>(data.size());
         
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
+
+        temp_conn.send(encode_bigendian_num(master_bytes.length(), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(data.size(),FDFS_PROTO_PKG_LEN_SIZE));
         temp_conn.send(std::vector<uint8_t>(prefix_bytes.begin(), prefix_bytes.end()));
         temp_conn.send(std::vector<uint8_t>(ext_bytes.begin(), ext_bytes.end()));
         temp_conn.send(std::vector<uint8_t>(master_bytes.begin(), master_bytes.end()));
@@ -346,9 +369,9 @@ std::string Operations::upload_slave_file(const std::string& master_file_id,
         }
         
         auto resp_body = temp_conn.recv(resp_header.length);
-        
-        std::string remote_filename_slave(reinterpret_cast<const char*>(resp_body.data()),
-                                         resp_body.size());
+
+        std::string remote_filename_slave(reinterpret_cast<const char*>(resp_body.data() + FDFS_GROUP_NAME_MAX_LEN),
+                                         resp_body.size() - FDFS_GROUP_NAME_MAX_LEN);
         
         return join_file_id(group_name, remote_filename_slave);
     } catch (...) {
@@ -375,29 +398,21 @@ std::vector<uint8_t> Operations::download_file(const std::string& file_id,
         
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
+
+        // Send offset (big-endian int64_t)
+        uint64_t offset_val = offset;
+        std::vector<uint8_t> offset_bytes = encode_bigendian_num(offset_val);
+        temp_conn.send(offset_bytes);
+
+        // Send length (big-endian int64_t)
+        uint64_t length_val = length;
+        std::vector<uint8_t> length_bytes = encode_bigendian_num(length_val);
+        temp_conn.send(length_bytes);
+
         auto group_bytes = pad_string(group_name, FDFS_GROUP_NAME_MAX_LEN);
         temp_conn.send(std::vector<uint8_t>(group_bytes.begin(), group_bytes.end()));
         temp_conn.send(std::vector<uint8_t>(remote_filename.begin(), remote_filename.end()));
-        
-        // Send offset (big-endian int64_t)
-        std::vector<uint8_t> offset_bytes(8);
-        int64_t offset_val = offset;
-        for (int i = 7; i >= 0; --i) {
-            offset_bytes[i] = static_cast<uint8_t>(offset_val & 0xFF);
-            offset_val >>= 8;
-        }
-        temp_conn.send(offset_bytes);
-        
-        // Send length (big-endian int64_t)
-        std::vector<uint8_t> length_bytes(8);
-        int64_t length_val = length;
-        for (int i = 7; i >= 0; --i) {
-            length_bytes[i] = static_cast<uint8_t>(length_val & 0xFF);
-            length_val >>= 8;
-        }
-        temp_conn.send(length_bytes);
-        
+
         auto resp_header_data = temp_conn.recv(FDFS_PROTO_HEADER_LEN);
         auto resp_header = decode_header(resp_header_data);
         
@@ -479,15 +494,14 @@ void Operations::append_file(const std::string& file_id,
     
     try {
         uint8_t cmd = static_cast<uint8_t>(StorageCommand::APPEND_FILE);
-        
-        int64_t body_len = FDFS_GROUP_NAME_MAX_LEN + static_cast<int64_t>(remote_filename.length()) +
-                          static_cast<int64_t>(data.size());
-        
+
+        int64_t body_len = FDFS_PROTO_PKG_LEN_SIZE * 2 + remote_filename.length() + data.size();
+
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
-        auto group_bytes = pad_string(group_name, FDFS_GROUP_NAME_MAX_LEN);
-        temp_conn.send(std::vector<uint8_t>(group_bytes.begin(), group_bytes.end()));
+
+        temp_conn.send(encode_bigendian_num(remote_filename.length(), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(data.size(), FDFS_PROTO_PKG_LEN_SIZE));
         temp_conn.send(std::vector<uint8_t>(remote_filename.begin(), remote_filename.end()));
         temp_conn.send(data);
         
@@ -516,25 +530,17 @@ void Operations::modify_file(const std::string& file_id,
     
     try {
         uint8_t cmd = static_cast<uint8_t>(StorageCommand::MODIFY_FILE);
-        
-        int64_t body_len = FDFS_GROUP_NAME_MAX_LEN + static_cast<int64_t>(remote_filename.length()) +
-                          8 + static_cast<int64_t>(data.size());
+
+        int64_t body_len = 3 * FDFS_PROTO_PKG_LEN_SIZE + static_cast<int64_t>(remote_filename.length()) +
+                            static_cast<int64_t>(data.size());
         
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
-        auto group_bytes = pad_string(group_name, FDFS_GROUP_NAME_MAX_LEN);
-        temp_conn.send(std::vector<uint8_t>(group_bytes.begin(), group_bytes.end()));
+
+        temp_conn.send(encode_bigendian_num(remote_filename.length(), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(static_cast<uint64_t>(offset), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(data.size(), FDFS_PROTO_PKG_LEN_SIZE));
         temp_conn.send(std::vector<uint8_t>(remote_filename.begin(), remote_filename.end()));
-        
-        // Send offset
-        std::vector<uint8_t> offset_bytes(8);
-        int64_t offset_val = offset;
-        for (int i = 7; i >= 0; --i) {
-            offset_bytes[i] = static_cast<uint8_t>(offset_val & 0xFF);
-            offset_val >>= 8;
-        }
-        temp_conn.send(offset_bytes);
         temp_conn.send(data);
         
         auto resp_header_data = temp_conn.recv(FDFS_PROTO_HEADER_LEN);
@@ -560,24 +566,14 @@ void Operations::truncate_file(const std::string& file_id, int64_t size) {
     
     try {
         uint8_t cmd = static_cast<uint8_t>(StorageCommand::TRUNCATE_FILE);
-        
-        int64_t body_len = FDFS_GROUP_NAME_MAX_LEN + static_cast<int64_t>(remote_filename.length()) + 8;
-        
+
+        int64_t body_len = FDFS_PROTO_PKG_LEN_SIZE * 2 + remote_filename.length();
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
-        auto group_bytes = pad_string(group_name, FDFS_GROUP_NAME_MAX_LEN);
-        temp_conn.send(std::vector<uint8_t>(group_bytes.begin(), group_bytes.end()));
+
+        temp_conn.send(encode_bigendian_num(remote_filename.length(), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(static_cast<uint64_t>(size), FDFS_PROTO_PKG_LEN_SIZE));
         temp_conn.send(std::vector<uint8_t>(remote_filename.begin(), remote_filename.end()));
-        
-        // Send size
-        std::vector<uint8_t> size_bytes(8);
-        int64_t size_val = size;
-        for (int i = 7; i >= 0; --i) {
-            size_bytes[i] = static_cast<uint8_t>(size_val & 0xFF);
-            size_val >>= 8;
-        }
-        temp_conn.send(size_bytes);
         
         auto resp_header_data = temp_conn.recv(FDFS_PROTO_HEADER_LEN);
         auto resp_header = decode_header(resp_header_data);
@@ -606,16 +602,21 @@ void Operations::set_metadata(const std::string& file_id,
         uint8_t cmd = static_cast<uint8_t>(StorageCommand::SET_METADATA);
         
         auto meta_data = encode_metadata(metadata);
-        int64_t body_len = FDFS_GROUP_NAME_MAX_LEN + static_cast<int64_t>(remote_filename.length()) +
-                          1 + static_cast<int64_t>(meta_data.size());
+        int64_t body_len = FDFS_PROTO_PKG_LEN_SIZE * 2 + 1 + FDFS_GROUP_NAME_MAX_LEN +
+                            static_cast<int64_t>(remote_filename.length()) + static_cast<int64_t>(meta_data.size());
         
         auto header = encode_header(body_len, cmd, 0);
         temp_conn.send(header);
-        
+
+        temp_conn.send(encode_bigendian_num(remote_filename.length(), FDFS_PROTO_PKG_LEN_SIZE));
+        temp_conn.send(encode_bigendian_num(meta_data.size(), FDFS_PROTO_PKG_LEN_SIZE));
+
+        temp_conn.send({static_cast<uint8_t>(flag)});
+
         auto group_bytes = pad_string(group_name, FDFS_GROUP_NAME_MAX_LEN);
         temp_conn.send(std::vector<uint8_t>(group_bytes.begin(), group_bytes.end()));
         temp_conn.send(std::vector<uint8_t>(remote_filename.begin(), remote_filename.end()));
-        temp_conn.send({static_cast<uint8_t>(flag)});
+
         temp_conn.send(meta_data);
         
         auto resp_header_data = temp_conn.recv(FDFS_PROTO_HEADER_LEN);

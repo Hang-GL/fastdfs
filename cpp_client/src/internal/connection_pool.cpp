@@ -7,6 +7,7 @@
 
 #include "internal/connection_pool.hpp"
 #include "internal/connection.hpp"
+#include "fastdfs/errors.hpp"
 #include <algorithm>
 #include <random>
 
